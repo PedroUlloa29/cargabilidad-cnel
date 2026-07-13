@@ -574,6 +574,33 @@ def buscar_carpetas_disponibles():
     return encontradas
 
 
+# ─── LECTURA DE DATOS YA EXISTENTES (MODO INCREMENTAL) ────────────────────────
+def cargar_datos_existentes():
+    """
+    Busca el JSON de datos ya embebido dentro del index.html actual
+    (generado en una corrida anterior) y lo devuelve como dict.
+    Devuelve None si no existe el archivo o no se pudo leer.
+    """
+    if not os.path.exists(SALIDA_HTML):
+        return None
+    try:
+        with open(SALIDA_HTML, 'r', encoding='utf-8') as f:
+            html = f.read()
+        marca = '{"periodos":'
+        idx = html.find(marca)
+        if idx == -1:
+            return None
+        decoder = json.JSONDecoder()
+        datos, _ = decoder.raw_decode(html, idx)
+        # Validación mínima de que el JSON tiene la forma esperada
+        if 'periodos' not in datos or 'trafos' not in datos:
+            return None
+        return datos
+    except Exception as e:
+        print(f"   ⚠ No se pudo leer el index.html existente ({e}). Se procesará todo desde cero.")
+        return None
+
+
 # ─── PROGRAMA PRINCIPAL ────────────────────────────────────────────────────────
 if __name__ == '__main__':
     print("=" * 60)
@@ -600,9 +627,62 @@ if __name__ == '__main__':
     for periodo, _, mes, anio, n_arch in carpetas:
         print(f"  ✓ {mes} {anio} ({n_arch} archivos)")
 
+    # ─── MODO INCREMENTAL: revisar si ya existe un index.html previo ──────────
+    existentes = cargar_datos_existentes()
+    periodos_existentes  = set(existentes['periodos']) if existentes else set()
+    periodos_disponibles = {c[0] for c in carpetas}
+    nuevos = sorted(periodos_disponibles - periodos_existentes)
+
+    periodo_forzado = None
+
+    if existentes:
+        print(f"\n📦 index.html actual ya tiene {len(periodos_existentes)} periodo(s): "
+              f"{', '.join(sorted(periodos_existentes))}")
+        if nuevos:
+            print(f"🆕 Periodo(s) nuevo(s) detectado(s): {', '.join(nuevos)}")
+        else:
+            print("   No hay periodos nuevos respecto al index.html actual.")
+
+        print("\n¿Qué deseas hacer?")
+        print("  1) Procesar SOLO el/los mes(es) nuevo(s)      [rápido, recomendado]")
+        print("  2) Reprocesar TODOS los meses desde cero      [lento]")
+        print("  3) Reprocesar UN mes específico (ej. corregiste un Excel)")
+        opcion = input("Elige 1, 2 o 3 [Enter = 1]: ").strip() or '1'
+
+        if opcion == '3':
+            periodo_forzado = input(
+                "¿Qué periodo quieres reprocesar? (formato AAAA-MM, ej. 2026-05): "
+            ).strip()
+    else:
+        print("\n📦 No se encontró un index.html previo válido: se procesará todo desde cero.")
+        opcion = '2'
+
+    if opcion == '1':
+        carpetas_a_procesar = [c for c in carpetas if c[0] not in periodos_existentes]
+        reusar_periodos     = periodos_existentes & periodos_disponibles
+    elif opcion == '3' and periodo_forzado:
+        carpetas_a_procesar = [c for c in carpetas if c[0] == periodo_forzado]
+        reusar_periodos     = (periodos_existentes & periodos_disponibles) - {periodo_forzado}
+    else:
+        carpetas_a_procesar = carpetas
+        reusar_periodos     = set()
+
+    # Reutilizar tal cual los periodos que no se van a reprocesar
+    if reusar_periodos:
+        print(f"\n♻️  Reutilizando datos ya existentes de: {', '.join(sorted(reusar_periodos))}")
+        for p in reusar_periodos:
+            todos_trafos   += [x for x in existentes['trafos']        if x['periodo'] == p]
+            todos_alim     += [x for x in existentes['alimentadoras'] if x['periodo'] == p]
+            todos_unidades += [x for x in existentes['unidades']      if x['periodo'] == p]
+            todos_totales  += [x for x in existentes['totales']       if x['periodo'] == p]
+            periodos_ok.append(p)
+
+    if not carpetas_a_procesar:
+        print("\n✅ No hay meses nuevos que procesar. El index.html ya está al día.")
+
     print()
 
-    for periodo, carpeta, mes_nombre, anio, _ in carpetas:
+    for periodo, carpeta, mes_nombre, anio, _ in carpetas_a_procesar:
         archivos = glob.glob(os.path.join(carpeta, '*.xlsx')) + \
                    glob.glob(os.path.join(carpeta, '*.xls'))
 
@@ -635,6 +715,13 @@ if __name__ == '__main__':
         print("\n❌ No se encontraron carpetas con datos. Verifica las rutas.")
         input("\nPresiona Enter para salir...")
         exit()
+
+    # Ordenar cronológicamente (importante al combinar datos reutilizados + nuevos)
+    periodos_ok = sorted(set(periodos_ok))
+    todos_trafos.sort(key=lambda x: x['periodo'])
+    todos_alim.sort(key=lambda x: x['periodo'])
+    todos_unidades.sort(key=lambda x: x['periodo'])
+    todos_totales.sort(key=lambda x: x['periodo'])
 
     # Construir JSON
     datos = {
